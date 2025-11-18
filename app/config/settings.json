@@ -1,0 +1,7 @@
+{
+  "ollama_endpoint": "http://localhost:11434",
+  "ollama_model": "qwen3:8b",
+  "thinking_level": true,
+  "show_thoughts": true,
+  "enable_streaming": true
+}

@@ -1,0 +1,9 @@
+[[pages]]
+path = "app/pages/0_assistant.py"
+name = "Assistant"
+icon ="🏠"
+
+[[pages]]
+path = "app/pages/1_settings.py"
+name = "Settings"
+icon = "🔧"
