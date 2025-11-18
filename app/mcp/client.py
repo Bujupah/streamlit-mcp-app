@@ -16,7 +16,7 @@ class ToolInvocationError(MCPClientError):
     """Raised when invoking a tool fails."""
 
 
-DEFAULT_TIMEOUT = httpx.Timeout(30.0, connect=5.0, read=30.0)
+DEFAULT_TIMEOUT = httpx.Timeout(600.0, connect=5.0, read=30.0)
 
 
 def fetch_server_tools(server: MCPServer) -> List[ToolBinding]:

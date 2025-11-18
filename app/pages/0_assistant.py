@@ -295,7 +295,8 @@ def _render_messages(show_thoughts: bool) -> None:
             tool_name = message.get("name") or "tool"
             with st.chat_message("assistant", avatar="🛠️"):
                 st.markdown(
-                    f"🔧 `{tool_name}` responded. Moving on to the next step..."
+                    f"<small>🔧 Responses received from `{tool_name}` — processing next steps...</small>",
+                    unsafe_allow_html=True,
                 )
             idx += 1
             continue

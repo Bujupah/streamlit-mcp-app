@@ -11,7 +11,7 @@ SETTINGS_PATH = CONFIG_DIR / "settings.json"
 SERVERS_PATH = CONFIG_DIR / "servers.json"
 
 DEFAULT_SETTINGS = AppSettings()
-DEFAULT_SERVERS = [MCPServer(name="dummy_server", url="http://localhost:3000")]
+DEFAULT_SERVERS = []
 
 
 def _ensure_config_dir() -> None:
