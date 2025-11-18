@@ -2,7 +2,7 @@ import streamlit as st
 from st_pages import add_page_title, get_nav_from_toml
 
 st.set_page_config(
-    layout="wide",
+    layout="centered",
     page_title="Assistant",
     page_icon="✨",
     initial_sidebar_state="expanded",

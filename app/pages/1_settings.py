@@ -8,7 +8,9 @@ from app.core.config import load_servers, load_settings, save_servers, save_sett
 from app.core.models import AppSettings, MCPServer
 from app.core.ollama import OllamaError, get_version, list_models
 
-st.set_page_config(page_title="Settings", layout="wide")
+st.set_page_config(
+    page_title="Settings", initial_sidebar_state="collapsed", layout="centered"
+)
 
 
 @st.cache_data(show_spinner=False)
@@ -149,24 +151,22 @@ with tabs[1]:
     for idx, server in enumerate(servers):
         with st.expander(f"{server.name}", expanded=False):
             with st.form(f"server_form_{idx}"):
-                name_value = st.text_input(
+                col1, col2 = st.columns(2)
+                name_value = col1.text_input(
                     "Name", value=server.name, key=f"server_name_{idx}"
                 )
-                url_value = st.text_input(
+                url_value = col2.text_input(
                     "Base URL", value=server.url, key=f"server_url_{idx}"
                 )
                 enabled_value = st.toggle(
                     "Enabled", value=server.enabled, key=f"server_enabled_{idx}"
                 )
-                description_value = st.text_area(
-                    "Description (optional)",
-                    value=server.description or "",
-                    key=f"server_description_{idx}",
+                save_col, delete_col = st.columns(2)
+                save_clicked = save_col.form_submit_button(
+                    "Save changes", type="primary", use_container_width=True
                 )
-                save_col, delete_col = st.columns([1, 1])
-                save_clicked = save_col.form_submit_button("Save changes")
                 delete_clicked = delete_col.form_submit_button(
-                    "Delete", type="secondary"
+                    "Delete", type="secondary", use_container_width=True
                 )
 
                 if save_clicked:
@@ -174,7 +174,6 @@ with tabs[1]:
                         name=name_value,
                         url=url_value,
                         enabled=enabled_value,
-                        description=description_value or None,
                     )
                     save_servers(servers)
                     st.session_state["app_servers"] = servers
@@ -193,7 +192,6 @@ with tabs[1]:
         new_name = st.text_input("Server name", key="new_server_name")
         new_url = st.text_input("Server URL", key="new_server_url")
         new_enabled = st.toggle("Enabled", key="new_server_enabled")
-        new_description = st.text_area("Description", key="new_server_description")
         add_clicked = st.form_submit_button("Add server")
 
         if add_clicked:
@@ -206,7 +204,6 @@ with tabs[1]:
                     name=new_name,
                     url=new_url,
                     enabled=new_enabled,
-                    description=new_description or None,
                 )
                 updated_servers = servers + [new_server]
                 save_servers(updated_servers)
@@ -214,6 +211,5 @@ with tabs[1]:
                 st.success(f"Added `{new_name}`.")
                 st.session_state["new_server_name"] = ""
                 st.session_state["new_server_url"] = ""
-                st.session_state["new_server_description"] = ""
                 st.session_state["new_server_enabled"] = True
                 st.rerun()

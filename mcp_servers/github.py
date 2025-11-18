@@ -1,4 +1,5 @@
 import contextlib
+import logging
 import os
 from typing import Any, Dict, Literal, Optional
 
@@ -10,6 +11,23 @@ GITHUB_API_BASE = os.environ.get("GITHUB_API_BASE", "https://api.github.com")
 DEFAULT_TIMEOUT = httpx.Timeout(30.0, connect=10.0, read=30.0, write=30.0)
 
 app = FastAPI()
+
+logger = logging.getLogger("mcp.github")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter("%(asctime)s %(levelname)s [mcp.github]: %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+logger.propagate = False
+
+
+def log_event(message: str, **context: Any) -> None:
+    if context:
+        context_str = " ".join(f"{key}={value!r}" for key, value in context.items())
+        logger.info("%s | %s", message, context_str)
+    else:
+        logger.info(message)
 
 
 def _build_url(path: str) -> str:
@@ -29,10 +47,12 @@ def _extract_bearer(authorization: Optional[str]) -> Optional[str]:
 def require_token(authorization: Optional[str] = Header(default=None)) -> str:
     token = _extract_bearer(authorization)
     if not token:
+        log_event("Token missing for GitHub request")
         raise HTTPException(
             status_code=401,
             detail="GitHub token required. Provide a Bearer token in the Authorization header.",
         )
+    log_event("GitHub token received", length=len(token))
     return token
 
 
@@ -49,6 +69,7 @@ async def github_request(
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+    log_event("GitHub API call", method=method, path=path, params=params or {})
     async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
         try:
             response = await client.request(
@@ -60,12 +81,28 @@ async def github_request(
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
+            log_event(
+                "GitHub API returned error",
+                method=method,
+                path=path,
+                status=exc.response.status_code,
+                detail=exc.response.text,
+            )
             detail: Any = exc.response.text
             with contextlib.suppress(Exception):
                 detail = exc.response.json()
             raise HTTPException(status_code=exc.response.status_code, detail=detail)
         except httpx.HTTPError as exc:
+            log_event(
+                "GitHub API request failed", method=method, path=path, error=str(exc)
+            )
             raise HTTPException(status_code=502, detail=str(exc))
+    log_event(
+        "GitHub API call succeeded",
+        method=method,
+        path=path,
+        status=response.status_code,
+    )
     with contextlib.suppress(ValueError):
         return response.json()
     return response.text
@@ -75,8 +112,6 @@ class GetAllPullRequestsArguments(BaseModel):
     owner: str
     repo: str
     state: Literal["open", "closed", "all"] = "open"
-    per_page: int = Field(default=30, ge=1, le=100)
-    page: int = Field(default=1, ge=1)
 
 
 class GetPullRequestArguments(BaseModel):
@@ -95,24 +130,18 @@ class ListPullRequestReviewsArguments(BaseModel):
     owner: str
     repo: str
     pull_number: int
-    per_page: int = Field(default=30, ge=1, le=100)
-    page: int = Field(default=1, ge=1)
 
 
 class ListPullRequestCommentsArguments(BaseModel):
     owner: str
     repo: str
     pull_number: int
-    per_page: int = Field(default=30, ge=1, le=100)
-    page: int = Field(default=1, ge=1)
 
 
 class ListPullRequestCommitsArguments(BaseModel):
     owner: str
     repo: str
     pull_number: int
-    per_page: int = Field(default=30, ge=1, le=100)
-    page: int = Field(default=1, ge=1)
 
 
 class Comment(BaseModel):
@@ -149,14 +178,6 @@ async def get_tools():
                         "type": "string",
                         "enum": ["open", "closed", "all"],
                         "description": "Filter pulls by state.",
-                    },
-                    "per_page": {
-                        "type": "number",
-                        "description": "Items per page (max 100).",
-                    },
-                    "page": {
-                        "type": "number",
-                        "description": "Page of results to fetch.",
                     },
                 },
                 "required": ["owner", "repo"],
@@ -197,8 +218,6 @@ async def get_tools():
                     "owner": {"type": "string"},
                     "repo": {"type": "string"},
                     "pull_number": {"type": "number"},
-                    "per_page": {"type": "number"},
-                    "page": {"type": "number"},
                 },
                 "required": ["owner", "repo", "pull_number"],
             },
@@ -212,8 +231,6 @@ async def get_tools():
                     "owner": {"type": "string"},
                     "repo": {"type": "string"},
                     "pull_number": {"type": "number"},
-                    "per_page": {"type": "number"},
-                    "page": {"type": "number"},
                 },
                 "required": ["owner", "repo", "pull_number"],
             },
@@ -227,8 +244,6 @@ async def get_tools():
                     "owner": {"type": "string"},
                     "repo": {"type": "string"},
                     "pull_number": {"type": "number"},
-                    "per_page": {"type": "number"},
-                    "page": {"type": "number"},
                 },
                 "required": ["owner", "repo", "pull_number"],
             },
@@ -301,9 +316,21 @@ async def get_tools():
 async def get_all_pull_requests(
     args: GetAllPullRequestsArguments, token: str = Depends(require_token)
 ):
-    params = {"state": args.state, "per_page": args.per_page, "page": args.page}
+    params = {"state": args.state}
     path = f"/repos/{args.owner}/{args.repo}/pulls"
+    log_event(
+        "Fetching pull requests",
+        owner=args.owner,
+        repo=args.repo,
+        state=args.state,
+    )
     result = await github_request("GET", path, token=token, params=params)
+    log_event(
+        "Fetched pull requests",
+        owner=args.owner,
+        repo=args.repo,
+        count=len(result) if isinstance(result, list) else "unknown",
+    )
     return {
         "result": result,
         "message": "Pull requests fetched successfully",
@@ -316,7 +343,19 @@ async def get_pull_request(
     args: GetPullRequestArguments, token: str = Depends(require_token)
 ):
     path = f"/repos/{args.owner}/{args.repo}/pulls/{args.pull_number}"
+    log_event(
+        "Fetching pull request",
+        owner=args.owner,
+        repo=args.repo,
+        pull=args.pull_number,
+    )
     result = await github_request("GET", path, token=token)
+    log_event(
+        "Fetched pull request",
+        owner=args.owner,
+        repo=args.repo,
+        pull=args.pull_number,
+    )
     return {
         "result": result,
         "message": "Pull request fetched successfully",
@@ -329,7 +368,20 @@ async def list_pull_request_files(
     args: ListPullRequestFilesArguments, token: str = Depends(require_token)
 ):
     path = f"/repos/{args.owner}/{args.repo}/pulls/{args.pull_number}/files"
+    log_event(
+        "Listing pull request files",
+        owner=args.owner,
+        repo=args.repo,
+        pull=args.pull_number,
+    )
     result = await github_request("GET", path, token=token)
+    log_event(
+        "Listed pull request files",
+        owner=args.owner,
+        repo=args.repo,
+        pull=args.pull_number,
+        count=len(result) if isinstance(result, list) else "unknown",
+    )
     return {
         "result": result,
         "message": "Pull request files fetched successfully",
@@ -341,13 +393,25 @@ async def list_pull_request_files(
 async def list_pull_request_reviews(
     args: ListPullRequestReviewsArguments, token: str = Depends(require_token)
 ):
-    params = {"per_page": args.per_page, "page": args.page}
     path = f"/repos/{args.owner}/{args.repo}/pulls/{args.pull_number}/reviews"
-    result = await github_request("GET", path, token=token, params=params)
+    log_event(
+        "Listing pull request reviews",
+        owner=args.owner,
+        repo=args.repo,
+        pull=args.pull_number,
+    )
+    result = await github_request("GET", path, token=token)
+    log_event(
+        "Listed pull request reviews",
+        owner=args.owner,
+        repo=args.repo,
+        pull=args.pull_number,
+        count=len(result) if isinstance(result, list) else "unknown",
+    )
     return {
         "result": result,
         "message": "Pull request reviews fetched successfully",
-        "meta": {"endpoint": _build_url(path), "params": params},
+        "meta": {"endpoint": _build_url(path)},
     }
 
 
@@ -355,13 +419,25 @@ async def list_pull_request_reviews(
 async def list_pull_request_comments(
     args: ListPullRequestCommentsArguments, token: str = Depends(require_token)
 ):
-    params = {"per_page": args.per_page, "page": args.page}
     path = f"/repos/{args.owner}/{args.repo}/pulls/{args.pull_number}/comments"
-    result = await github_request("GET", path, token=token, params=params)
+    log_event(
+        "Listing pull request comments",
+        owner=args.owner,
+        repo=args.repo,
+        pull=args.pull_number,
+    )
+    result = await github_request("GET", path, token=token)
+    log_event(
+        "Listed pull request comments",
+        owner=args.owner,
+        repo=args.repo,
+        pull=args.pull_number,
+        count=len(result) if isinstance(result, list) else "unknown",
+    )
     return {
         "result": result,
         "message": "Pull request comments fetched successfully",
-        "meta": {"endpoint": _build_url(path), "params": params},
+        "meta": {"endpoint": _build_url(path)},
     }
 
 
@@ -369,13 +445,25 @@ async def list_pull_request_comments(
 async def list_pull_request_commits(
     args: ListPullRequestCommitsArguments, token: str = Depends(require_token)
 ):
-    params = {"per_page": args.per_page, "page": args.page}
     path = f"/repos/{args.owner}/{args.repo}/pulls/{args.pull_number}/commits"
-    result = await github_request("GET", path, token=token, params=params)
+    log_event(
+        "Listing pull request commits",
+        owner=args.owner,
+        repo=args.repo,
+        pull=args.pull_number,
+    )
+    result = await github_request("GET", path, token=token)
+    log_event(
+        "Listed pull request commits",
+        owner=args.owner,
+        repo=args.repo,
+        pull=args.pull_number,
+        count=len(result) if isinstance(result, list) else "unknown",
+    )
     return {
         "result": result,
         "message": "Pull request commits fetched successfully",
-        "meta": {"endpoint": _build_url(path), "params": params},
+        "meta": {"endpoint": _build_url(path)},
     }
 
 
@@ -393,7 +481,22 @@ async def create_pull_request_review(
     ]
     if comments:
         payload["comments"] = comments
+    log_event(
+        "Creating pull request review",
+        owner=args.owner,
+        repo=args.repo,
+        pull=args.pull_number,
+        event=args.event,
+        comments=len(comments),
+    )
     result = await github_request("POST", path, token=token, json_body=payload)
+    log_event(
+        "Pull request review created",
+        owner=args.owner,
+        repo=args.repo,
+        pull=args.pull_number,
+        event=args.event,
+    )
     return {
         "result": result,
         "message": "Pull request review created successfully",

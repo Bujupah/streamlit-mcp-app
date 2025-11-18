@@ -5,6 +5,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
+from streamlit_js_eval import streamlit_js_eval
 from streamlit.delta_generator import DeltaGenerator
 
 from app.core.config import load_servers, load_settings, set_server_enabled
@@ -12,7 +13,9 @@ from app.core.models import AppSettings, MCPServer, ToolBinding
 from app.core.ollama import OllamaError, chat_completion, list_models, stream_chat
 from app.mcp.client import ToolInvocationError, call_tool, refresh_tool_bindings
 
-st.set_page_config(page_title="Assistant", layout="wide")
+st.set_page_config(
+    page_title="Assistant", layout="centered", initial_sidebar_state="expanded"
+)
 
 STATE_SETTINGS = "app_settings"
 STATE_SERVERS = "app_servers"
@@ -26,6 +29,7 @@ STATE_TOOL_ERRORS = "tool_errors"
 STATE_GENERATING = "assistant_generating"
 STATE_REQUEST_STATUS = "request_status"
 STATE_SERVER_TOKENS = "server_tokens"
+STATE_STORAGE_WRITE_NONCE = "storage_write_nonce"
 
 STATUS_LOADING = "Loading..."
 STATUS_THINKING = "Thinking..."
@@ -53,6 +57,32 @@ def log_step(message: str, **context: Any) -> None:
         logger.info(message)
 
 
+def _read_session_storage(key: str) -> Optional[str]:
+    try:
+        return streamlit_js_eval(
+            js_expressions=f"window.sessionStorage.getItem('{key}')",
+            key=f"session_storage_get_{key}",
+        )
+    except Exception as exc:
+        log_step("Session storage read failed", key=key, error=str(exc))
+        return None
+
+
+def _write_session_storage(key: str, value: Optional[str]) -> None:
+    st.session_state[STATE_STORAGE_WRITE_NONCE] = (
+        st.session_state.get(STATE_STORAGE_WRITE_NONCE, 0) + 1
+    )
+    nonce = st.session_state[STATE_STORAGE_WRITE_NONCE]
+    if value:
+        expr = f"window.sessionStorage.setItem('{key}', {json.dumps(value)})"
+    else:
+        expr = f"window.sessionStorage.removeItem('{key}')"
+    try:
+        streamlit_js_eval(js_expressions=expr, key=f"session_storage_set_{key}_{nonce}")
+    except Exception as exc:
+        log_step("Session storage write failed", key=key, error=str(exc))
+
+
 def _get_request_status(default: str = STATUS_THOUGHTS) -> str:
     return st.session_state.get(STATE_REQUEST_STATUS, default)
 
@@ -78,29 +108,41 @@ def _update_runtime_settings(**updates: Any) -> AppSettings:
 class RequestStatusView:
     """Renders and updates the per-request status (and thinking output)."""
 
-    def __init__(self, *, show_thoughts: bool):
+    def __init__(self, *, show_thoughts: bool, streaming: bool):
         self.show_thoughts = show_thoughts
         self.status = _get_request_status(STATUS_THOUGHTS)
+        self.streaming = streaming
+        self.spinner_placeholder = st.empty() if not show_thoughts else None
         self.thinking_placeholder = st.empty() if show_thoughts else None
         self.thinking_text = ""
         self.placeholder_message = "_Thinking..._"
         self._render_thinking()
 
     def _render_thinking(self) -> None:
-        if not self.thinking_placeholder:
-            return
-        self.thinking_placeholder.empty()
-        with self.thinking_placeholder.container():
-            with st.expander(self.status or STATUS_THOUGHTS, icon="💭"):
-                if self.thinking_text:
-                    st.code(
-                        self.thinking_text,
-                        language="markdown",
-                        line_numbers=False,
-                        wrap_lines=True,
-                    )
+        if self.show_thoughts:
+            if not self.thinking_placeholder:
+                return
+            self.thinking_placeholder.empty()
+            with self.thinking_placeholder.container():
+                with st.expander(self.status or STATUS_THOUGHTS, icon="💭"):
+                    if self.thinking_text:
+                        st.code(
+                            self.thinking_text,
+                            language="markdown",
+                            line_numbers=False,
+                            wrap_lines=True,
+                        )
+                    else:
+                        st.caption(self.placeholder_message)
+        else:
+            if not self.spinner_placeholder:
+                return
+            self.spinner_placeholder.empty()
+            with self.spinner_placeholder:
+                if self.streaming:
+                    st.spinner(f"{self.status or 'Streaming response'}…")
                 else:
-                    st.caption(self.placeholder_message)
+                    st.caption("Working on it...")
 
     def update_status(self, status: str) -> None:
         self.status = status or STATUS_THOUGHTS
@@ -113,7 +155,7 @@ class RequestStatusView:
 
     def show_placeholder(self, message: str) -> None:
         self.placeholder_message = message
-        if not self.thinking_text:
+        if self.show_thoughts and not self.thinking_text:
             self._render_thinking()
 
 
@@ -221,41 +263,40 @@ def _render_messages(show_thoughts: bool) -> None:
                             wrap_lines=True,
                         )
                 content = message.get("content") or ""
-                awaiting_tool_results = not content and (
-                    inline_tools or message.get("tool_calls")
-                )
+                awaiting_tool_results = not content and message.get("tool_calls")
                 if content:
                     st.markdown(content, unsafe_allow_html=True)
+                elif inline_tools:
+                    tool_names = ", ".join(
+                        f"`{tool.get('name') or 'tool'}`" for tool in inline_tools
+                    )
+                    st.markdown(
+                        f"<small>🔧 Responses received from `{tool_names}` — processing next steps...</small>",
+                        unsafe_allow_html=True,
+                    )
                 elif awaiting_tool_results:
                     st.markdown("_Awaiting tool results..._")
                 else:
                     st.caption("_No assistant response text_")
-                if inline_tools:
-                    for tool_message in inline_tools:
-                        tool_name = tool_message.get("name") or "tool"
-                        st.markdown(f"**Result from `{tool_name}`**")
-                        st.code(
-                            tool_message.get("content", ""),
-                            language="json",
-                            wrap_lines=True,
-                        )
                 status_text = message.get("status")
-                if status_text:
-                    st.caption(f"Status: {status_text}")
                 tool_calls = message.get("tool_calls") or []
-                if tool_calls:
-                    tool_names = ", ".join(
-                        call.get("function", {}).get("name", "tool")
-                        for call in tool_calls
-                    )
-                    st.caption(f"Tool calls requested: {tool_names}")
+                if not inline_tools:
+                    if status_text:
+                        st.caption(f"Status: {status_text}")
+                    if tool_calls:
+                        tool_names = ", ".join(
+                            call.get("function", {}).get("name", "tool")
+                            for call in tool_calls
+                        )
+                        st.caption(f"Tool calls requested: {tool_names}")
             idx = scan_idx
             continue
         if role == "tool":
             tool_name = message.get("name") or "tool"
             with st.chat_message("assistant", avatar="🛠️"):
-                st.markdown(f"**Result from `{tool_name}`**")
-                st.code(message.get("content", ""), language="json", wrap_lines=True)
+                st.markdown(
+                    f"🔧 `{tool_name}` responded. Moving on to the next step..."
+                )
             idx += 1
             continue
         idx += 1
@@ -289,7 +330,9 @@ def _consume_stream(payload: Dict[str, Any], show_thoughts: bool):
     final_event: Dict[str, Any] = {}
     status_view: Optional[RequestStatusView] = None
     with st.chat_message("assistant"):
-        status_view = RequestStatusView(show_thoughts=show_thoughts)
+        status_view = RequestStatusView(
+            show_thoughts=show_thoughts, streaming=settings.enable_streaming
+        )
         tool_box = st.container()
         content_box = st.empty()
         try:
@@ -352,7 +395,9 @@ def _run_completion(payload: Dict[str, Any], show_thoughts: bool):
     settings: AppSettings = st.session_state[STATE_SETTINGS]
     status_view: Optional[RequestStatusView] = None
     with st.chat_message("assistant"):
-        status_view = RequestStatusView(show_thoughts=show_thoughts)
+        status_view = RequestStatusView(
+            show_thoughts=show_thoughts, streaming=settings.enable_streaming
+        )
         tool_box = st.container()
         content_box = st.empty()
         try:
@@ -464,13 +509,12 @@ def _handle_tool_calls(
         st.session_state[STATE_MESSAGES].append(
             {"role": "tool", "name": binding.name, "content": rendered}
         )
+        summary = f"🔧 `{tool_name}` responded. Moving on to the next step..."
         if tool_box is not None:
-            tool_box.markdown(f"**{binding.server_name} · {binding.display_name}**")
-            tool_box.code(rendered, language="json", wrap_lines=True)
+            tool_box.markdown(f"**{summary}**")
         else:
             with st.chat_message("assistant", avatar="🛠️"):
-                st.markdown(f"**{binding.server_name} · {binding.display_name}**")
-                st.code(rendered, language="json", wrap_lines=True)
+                st.markdown(f"**{summary}**")
 
 
 def _run_assistant_turn() -> None:
@@ -603,9 +647,17 @@ def _render_sidebar() -> None:
             )
             if "github" in server.name.lower():
                 token_key = f"server_token_{server.name}"
-                st.session_state.setdefault(
-                    token_key, server_tokens.get(server.name, "")
-                )
+                storage_key = f"mcp_token_{server.name}"
+                browser_value = _read_session_storage(storage_key) or ""
+                current_server_value = server_tokens.get(server.name, "")
+                if browser_value and browser_value != current_server_value:
+                    server_tokens[server.name] = browser_value
+                    current_server_value = browser_value
+                if (
+                    token_key not in st.session_state or not st.session_state[token_key]
+                ) and current_server_value:
+                    st.session_state[token_key] = current_server_value
+                st.session_state.setdefault(token_key, current_server_value or "")
                 st.text_input(
                     "GitHub token (session only)",
                     key=token_key,
@@ -618,8 +670,10 @@ def _render_sidebar() -> None:
                 if token_value != stored_value:
                     if token_value:
                         server_tokens[server.name] = token_value
+                        _write_session_storage(storage_key, token_value)
                     else:
                         server_tokens.pop(server.name, None)
+                        _write_session_storage(storage_key, None)
                     log_step(
                         "Server token updated",
                         server=server.name,

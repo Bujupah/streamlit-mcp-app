@@ -1,7 +1,12 @@
 [
   {
-    "name": "Github Enterprise",
-    "url": "http://localhost:3000",
+    "name": "Github",
+    "url": "http://localhost:3000/github",
+    "enabled": true
+  },
+  {
+    "name": "Calculator",
+    "url": "http://localhost:3000/calculator",
     "enabled": true
   }
 ]
