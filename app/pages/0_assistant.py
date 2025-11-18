@@ -25,6 +25,7 @@ STATE_TOOL_LOOKUP = "tool_lookup"
 STATE_TOOL_ERRORS = "tool_errors"
 STATE_GENERATING = "assistant_generating"
 STATE_REQUEST_STATUS = "request_status"
+STATE_SERVER_TOKENS = "server_tokens"
 
 STATUS_LOADING = "Loading..."
 STATUS_THINKING = "Thinking..."
@@ -137,6 +138,7 @@ def _init_state() -> None:
     st.session_state.setdefault(STATE_TOOL_ERRORS, [])
     st.session_state.setdefault(STATE_GENERATING, False)
     st.session_state.setdefault(STATE_REQUEST_STATUS, STATUS_THOUGHTS)
+    st.session_state.setdefault(STATE_SERVER_TOKENS, {})
     log_step(
         "Session state initialized",
         servers=len(st.session_state[STATE_SERVERS]),
@@ -418,6 +420,7 @@ def _handle_tool_calls(
     status_view: Optional[RequestStatusView] = None,
 ) -> None:
     lookup: Dict[str, ToolBinding] = st.session_state[STATE_TOOL_LOOKUP]
+    server_tokens: Dict[str, str] = st.session_state.get(STATE_SERVER_TOKENS, {})
     for call in tool_calls:
         function_data = call.get("function") or {}
         tool_name = function_data.get("name", "")
@@ -446,7 +449,9 @@ def _handle_tool_calls(
                 server=binding.server_name,
                 arguments=arguments,
             )
-            result = call_tool(binding, arguments)
+            token = server_tokens.get(binding.server_name)
+            headers = {"Authorization": f"Bearer {token}"} if token else None
+            result = call_tool(binding, arguments, headers=headers)
             rendered = _format_tool_result(result)
             log_step("Tool invocation succeeded", tool=binding.name)
         except ToolInvocationError as exc:
@@ -584,6 +589,7 @@ def _render_sidebar() -> None:
         st.caption(
             "Enable/disable servers to control tool discovery. Refresh tools after changes."
         )
+        server_tokens = st.session_state[STATE_SERVER_TOKENS]
         for server in st.session_state[STATE_SERVERS]:
             key = f"server_toggle_{server.name}"
             st.session_state.setdefault(key, server.enabled)
@@ -595,6 +601,36 @@ def _render_sidebar() -> None:
                 on_change=_on_server_toggle,
                 args=(server.name,),
             )
+            if "github" in server.name.lower():
+                token_key = f"server_token_{server.name}"
+                st.session_state.setdefault(
+                    token_key, server_tokens.get(server.name, "")
+                )
+                st.text_input(
+                    "GitHub token (session only)",
+                    key=token_key,
+                    type="password",
+                    placeholder="ghp_xxx or token with repo scope",
+                    help="Stored in memory for this session and sent only to the GitHub MCP server.",
+                )
+                token_value = st.session_state.get(token_key, "").strip()
+                stored_value = server_tokens.get(server.name, "")
+                if token_value != stored_value:
+                    if token_value:
+                        server_tokens[server.name] = token_value
+                    else:
+                        server_tokens.pop(server.name, None)
+                    log_step(
+                        "Server token updated",
+                        server=server.name,
+                        provided=bool(token_value),
+                    )
+                if token_value:
+                    st.caption("🔐 Session token active for GitHub requests.")
+                else:
+                    st.caption(
+                        "Add a GitHub token (repo scope) to access private data. Not persisted."
+                    )
 
         st.subheader("Tools")
         bindings: List[ToolBinding] = st.session_state[STATE_TOOL_BINDINGS]

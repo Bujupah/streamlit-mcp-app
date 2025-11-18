@@ -1,35 +1,128 @@
-from typing import Literal
-from fastapi import FastAPI
+import contextlib
+import os
+from typing import Any, Dict, Literal, Optional
+
+import httpx
+from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
+
+GITHUB_API_BASE = os.environ.get("GITHUB_API_BASE", "https://api.github.com")
+DEFAULT_TIMEOUT = httpx.Timeout(30.0, connect=10.0, read=30.0, write=30.0)
 
 app = FastAPI()
 
 
+def _build_url(path: str) -> str:
+    base = GITHUB_API_BASE.rstrip("/")
+    return f"{base}{path if path.startswith('/') else '/' + path}"
+
+
+def _extract_bearer(authorization: Optional[str]) -> Optional[str]:
+    if not authorization:
+        return None
+    scheme, _, value = authorization.partition(" ")
+    if value and scheme.lower() == "bearer":
+        return value.strip()
+    return authorization.strip()
+
+
+def require_token(authorization: Optional[str] = Header(default=None)) -> str:
+    token = _extract_bearer(authorization)
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail="GitHub token required. Provide a Bearer token in the Authorization header.",
+        )
+    return token
+
+
+async def github_request(
+    method: str,
+    path: str,
+    *,
+    token: str,
+    params: Optional[Dict[str, Any]] = None,
+    json_body: Optional[Dict[str, Any]] = None,
+) -> Any:
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        try:
+            response = await client.request(
+                method,
+                _build_url(path),
+                headers=headers,
+                params=params,
+                json=json_body,
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail: Any = exc.response.text
+            with contextlib.suppress(Exception):
+                detail = exc.response.json()
+            raise HTTPException(status_code=exc.response.status_code, detail=detail)
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=str(exc))
+    with contextlib.suppress(ValueError):
+        return response.json()
+    return response.text
+
+
 class GetAllPullRequestsArguments(BaseModel):
     owner: str
-    repo: str  # Changed from 'repository' to match tool definition
+    repo: str
+    state: Literal["open", "closed", "all"] = "open"
+    per_page: int = Field(default=30, ge=1, le=100)
+    page: int = Field(default=1, ge=1)
 
 
 class GetPullRequestArguments(BaseModel):
     owner: str
-    repo: str  # Changed from 'repository' to match tool definition
+    repo: str
     pull_number: int
 
 
 class ListPullRequestFilesArguments(BaseModel):
     owner: str
-    repo: str  # Changed from 'repository' to match tool definition
+    repo: str
     pull_number: int
+
+
+class ListPullRequestReviewsArguments(BaseModel):
+    owner: str
+    repo: str
+    pull_number: int
+    per_page: int = Field(default=30, ge=1, le=100)
+    page: int = Field(default=1, ge=1)
+
+
+class ListPullRequestCommentsArguments(BaseModel):
+    owner: str
+    repo: str
+    pull_number: int
+    per_page: int = Field(default=30, ge=1, le=100)
+    page: int = Field(default=1, ge=1)
+
+
+class ListPullRequestCommitsArguments(BaseModel):
+    owner: str
+    repo: str
+    pull_number: int
+    per_page: int = Field(default=30, ge=1, le=100)
+    page: int = Field(default=1, ge=1)
 
 
 class Comment(BaseModel):
     body: str
     path: str
-    position: int = None  # Made optional with default
-    line: int = None  # Made optional with default
-    side: str = None  # Made optional with default
-    start_line: int = None  # Made optional with default
-    start_side: str = None  # Made optional with default
+    position: int = None
+    line: int = None
+    side: str = None
+    start_line: int = None
+    start_side: str = None
 
 
 class CreatePullRequestReviewArguments(BaseModel):
@@ -37,7 +130,7 @@ class CreatePullRequestReviewArguments(BaseModel):
     repo: str
     pull_number: int
     body: str
-    event: Literal["REQUEST_CHANGES", "APPROVE", "COMMENT"]  # Added COMMENT
+    event: Literal["REQUEST_CHANGES", "APPROVE", "COMMENT"]
     comments: list[Comment] = Field(default_factory=list)
 
 
@@ -50,13 +143,20 @@ async def get_tools():
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "owner": {
+                    "owner": {"type": "string", "description": "Repository owner."},
+                    "repo": {"type": "string", "description": "Repository name."},
+                    "state": {
                         "type": "string",
-                        "description": "The owner of the repository",
+                        "enum": ["open", "closed", "all"],
+                        "description": "Filter pulls by state.",
                     },
-                    "repo": {
-                        "type": "string",
-                        "description": "The name of the repository",
+                    "per_page": {
+                        "type": "number",
+                        "description": "Items per page (max 100).",
+                    },
+                    "page": {
+                        "type": "number",
+                        "description": "Page of results to fetch.",
                     },
                 },
                 "required": ["owner", "repo"],
@@ -68,18 +168,9 @@ async def get_tools():
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "owner": {
-                        "type": "string",
-                        "description": "The owner of the repository",
-                    },
-                    "repo": {
-                        "type": "string",
-                        "description": "The name of the repository",
-                    },
-                    "pull_number": {
-                        "type": "number",
-                        "description": "The number of the pull request",
-                    },
+                    "owner": {"type": "string"},
+                    "repo": {"type": "string"},
+                    "pull_number": {"type": "number"},
                 },
                 "required": ["owner", "repo", "pull_number"],
             },
@@ -90,18 +181,54 @@ async def get_tools():
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "owner": {
-                        "type": "string",
-                        "description": "The owner of the repository",
-                    },
-                    "repo": {
-                        "type": "string",
-                        "description": "The name of the repository",
-                    },
-                    "pull_number": {
-                        "type": "number",
-                        "description": "The number of the pull request",
-                    },
+                    "owner": {"type": "string"},
+                    "repo": {"type": "string"},
+                    "pull_number": {"type": "number"},
+                },
+                "required": ["owner", "repo", "pull_number"],
+            },
+        },
+        {
+            "name": "list_pull_request_reviews",
+            "description": "Lists all reviews on a pull request.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "owner": {"type": "string"},
+                    "repo": {"type": "string"},
+                    "pull_number": {"type": "number"},
+                    "per_page": {"type": "number"},
+                    "page": {"type": "number"},
+                },
+                "required": ["owner", "repo", "pull_number"],
+            },
+        },
+        {
+            "name": "list_pull_request_comments",
+            "description": "Lists all review comments on a pull request.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "owner": {"type": "string"},
+                    "repo": {"type": "string"},
+                    "pull_number": {"type": "number"},
+                    "per_page": {"type": "number"},
+                    "page": {"type": "number"},
+                },
+                "required": ["owner", "repo", "pull_number"],
+            },
+        },
+        {
+            "name": "list_pull_request_commits",
+            "description": "Lists commits that are part of a pull request.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "owner": {"type": "string"},
+                    "repo": {"type": "string"},
+                    "pull_number": {"type": "number"},
+                    "per_page": {"type": "number"},
+                    "page": {"type": "number"},
                 },
                 "required": ["owner", "repo", "pull_number"],
             },
@@ -140,31 +267,24 @@ async def get_tools():
                             "properties": {
                                 "body": {
                                     "type": "string",
-                                    "description": "Text of the review comment.",
                                 },
                                 "path": {
                                     "type": "string",
-                                    "description": "The relative path to the file that necessitates a review comment.",
                                 },
                                 "position": {
                                     "type": "number",
-                                    "description": 'The position in the diff where you want to add a review comment. Note this value is not the same as the line number in the file. The position value equals the number of lines down from the first "@@" hunk header in the file you want to add a comment. The line just below the "@@" line is position 1, the next line is position 2, and so on. The position in the diff continues to increase through lines of whitespace and additional hunks until the beginning of a new file.',
                                 },
                                 "line": {
                                     "type": "number",
-                                    "description": "The line of the comment",
                                 },
                                 "side": {
                                     "type": "string",
-                                    "description": "The side of the comment",
                                 },
                                 "start_line": {
                                     "type": "number",
-                                    "description": "The start line of the comment",
                                 },
                                 "start_side": {
                                     "type": "string",
-                                    "description": "The start side of the comment",
                                 },
                             },
                             "required": ["body", "path"],
@@ -178,108 +298,106 @@ async def get_tools():
 
 
 @app.post("/tools/get_all_pull_requests")
-async def get_all_pull_requests(args: GetAllPullRequestsArguments):
-    endpoint = (
-        "https://api.github.com"
-        + "/repos/"
-        + args.owner
-        + "/"
-        + args.repo  # Changed from args.repository
-        + "/pulls"
-    )
+async def get_all_pull_requests(
+    args: GetAllPullRequestsArguments, token: str = Depends(require_token)
+):
+    params = {"state": args.state, "per_page": args.per_page, "page": args.page}
+    path = f"/repos/{args.owner}/{args.repo}/pulls"
+    result = await github_request("GET", path, token=token, params=params)
     return {
-        "result": [],
+        "result": result,
         "message": "Pull requests fetched successfully",
-        "meta": {"endpoint": endpoint, "args": args.model_dump_json()},
+        "meta": {"endpoint": _build_url(path), "params": params},
     }
 
 
 @app.post("/tools/get_pull_request")
-async def get_pull_request(args: GetPullRequestArguments):
-    endpoint = (
-        "https://api.github.com"
-        + "/repos/"
-        + args.owner
-        + "/"
-        + args.repo  # Changed from args.repository
-        + "/pulls/"
-        + str(args.pull_number)
-    )
+async def get_pull_request(
+    args: GetPullRequestArguments, token: str = Depends(require_token)
+):
+    path = f"/repos/{args.owner}/{args.repo}/pulls/{args.pull_number}"
+    result = await github_request("GET", path, token=token)
     return {
-        "result": {
-            "title": "Pull Request Title",
-            "body": "Pull Request Body",
-            "state": "OPEN",
-            "created_at": "2021-01-01",
-            "updated_at": "2021-01-01",
-            "closed_at": "2021-01-01",
-        },
+        "result": result,
         "message": "Pull request fetched successfully",
-        "meta": {"endpoint": endpoint, "args": args.model_dump_json()},
+        "meta": {"endpoint": _build_url(path)},
     }
 
 
 @app.post("/tools/list_pull_request_files")
-async def list_pull_request_files(args: ListPullRequestFilesArguments):
-    endpoint = (
-        "https://api.github.com"
-        + "/repos/"
-        + args.owner
-        + "/"
-        + args.repo  # Changed from args.repository
-        + "/pulls/"
-        + str(args.pull_number)
-        + "/files"
-    )
+async def list_pull_request_files(
+    args: ListPullRequestFilesArguments, token: str = Depends(require_token)
+):
+    path = f"/repos/{args.owner}/{args.repo}/pulls/{args.pull_number}/files"
+    result = await github_request("GET", path, token=token)
     return {
-        "result": [],
+        "result": result,
         "message": "Pull request files fetched successfully",
-        "meta": {"endpoint": endpoint, "args": args.model_dump_json()},
+        "meta": {"endpoint": _build_url(path)},
+    }
+
+
+@app.post("/tools/list_pull_request_reviews")
+async def list_pull_request_reviews(
+    args: ListPullRequestReviewsArguments, token: str = Depends(require_token)
+):
+    params = {"per_page": args.per_page, "page": args.page}
+    path = f"/repos/{args.owner}/{args.repo}/pulls/{args.pull_number}/reviews"
+    result = await github_request("GET", path, token=token, params=params)
+    return {
+        "result": result,
+        "message": "Pull request reviews fetched successfully",
+        "meta": {"endpoint": _build_url(path), "params": params},
+    }
+
+
+@app.post("/tools/list_pull_request_comments")
+async def list_pull_request_comments(
+    args: ListPullRequestCommentsArguments, token: str = Depends(require_token)
+):
+    params = {"per_page": args.per_page, "page": args.page}
+    path = f"/repos/{args.owner}/{args.repo}/pulls/{args.pull_number}/comments"
+    result = await github_request("GET", path, token=token, params=params)
+    return {
+        "result": result,
+        "message": "Pull request comments fetched successfully",
+        "meta": {"endpoint": _build_url(path), "params": params},
+    }
+
+
+@app.post("/tools/list_pull_request_commits")
+async def list_pull_request_commits(
+    args: ListPullRequestCommitsArguments, token: str = Depends(require_token)
+):
+    params = {"per_page": args.per_page, "page": args.page}
+    path = f"/repos/{args.owner}/{args.repo}/pulls/{args.pull_number}/commits"
+    result = await github_request("GET", path, token=token, params=params)
+    return {
+        "result": result,
+        "message": "Pull request commits fetched successfully",
+        "meta": {"endpoint": _build_url(path), "params": params},
     }
 
 
 @app.post("/tools/create_pull_request_review")
-async def create_pull_request_review(args: CreatePullRequestReviewArguments):
-    endpoint = (
-        "https://api.github.com"
-        + "/repos/"
-        + args.owner
-        + "/"
-        + args.repo
-        + "/pulls/"
-        + str(args.pull_number)
-        + "/reviews"
-    )
+async def create_pull_request_review(
+    args: CreatePullRequestReviewArguments, token: str = Depends(require_token)
+):
+    path = f"/repos/{args.owner}/{args.repo}/pulls/{args.pull_number}/reviews"
+    payload = {
+        "event": args.event,
+        "body": args.body,
+    }
+    comments = [
+        comment.model_dump(exclude_none=True) for comment in args.comments or []
+    ]
+    if comments:
+        payload["comments"] = comments
+    result = await github_request("POST", path, token=token, json_body=payload)
     return {
-        "result": {
-            "files": [
-                {
-                    "path": "path/to/file.txt",
-                    "status": "added",
-                    "changes": 10,
-                    "additions": 10,
-                    "deletions": 10,
-                }
-            ],
-            "summary": {
-                "total_changes": 10,
-                "total_additions": 10,
-                "total_deletions": 10,
-            },
-            "conclusion": "APPROVED",
-            "review_comments": [
-                {
-                    "body": "Review comment body",
-                    "path": "path/to/file.txt",
-                    "position": 1,
-                }
-            ],
-            "review_comments_count": 1,
-            "review_comments_url": "https://api.github.com/repos/owner/repo/pulls/1/reviews/1/comments",
-            "review_comments_html_url": "https://github.com/owner/repo/pull/1/reviews/1/comments",
-        },
+        "result": result,
         "message": "Pull request review created successfully",
-        "meta": {"endpoint": endpoint, "args": args.model_dump_json()},
+        "meta": {"endpoint": _build_url(path)},
     }
 
 

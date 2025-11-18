@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -71,16 +71,27 @@ def refresh_tool_bindings(
     return bindings, errors
 
 
-def call_tool(binding: ToolBinding, arguments: Dict[str, Any]) -> Any:
+def call_tool(
+    binding: ToolBinding,
+    arguments: Dict[str, Any],
+    headers: Optional[Dict[str, str]] = None,
+) -> Any:
     """Invoke a tool based on its binding metadata."""
+    request_headers = headers.copy() if headers else None
     try:
         if binding.method == "GET":
             response = httpx.get(
-                binding.endpoint, params=arguments, timeout=DEFAULT_TIMEOUT
+                binding.endpoint,
+                params=arguments,
+                timeout=DEFAULT_TIMEOUT,
+                headers=request_headers,
             )
         else:
             response = httpx.post(
-                binding.endpoint, json=arguments, timeout=DEFAULT_TIMEOUT
+                binding.endpoint,
+                json=arguments,
+                timeout=DEFAULT_TIMEOUT,
+                headers=request_headers,
             )
         response.raise_for_status()
     except httpx.HTTPError as exc:
